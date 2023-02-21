@@ -1,0 +1,1 @@
+#define _USE_MODULE_CLI
