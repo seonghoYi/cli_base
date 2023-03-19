@@ -4,19 +4,28 @@
 #include "config_def.h"
 
 #include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 
 #ifdef _USE_MODULE_CLI
 
+typedef struct
+{
+    int argc;
+    char** argv;
 
-int cliInit(void);
-int cliDeinit(void);
-int cliOpen(void);
-int cliClose(void);
+} cliArgs_t;
 
-int cliSpinOnce(void);
+bool cliInit(void);
+bool cliDeinit(void);
+bool cliOpen(void);
+bool cliClose(void);
+
+bool cliSpinOnce(void);
 
 
 

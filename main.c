@@ -10,9 +10,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "thread.h"
-#include "mutex.h"
-
 #include "cli.h"
 #include "term.h"
 

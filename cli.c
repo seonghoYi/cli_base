@@ -3,9 +3,13 @@
 
 #ifdef _USE_MODULE_CLI
 
-#define CLI_LINE_BUF_MAX    256
+#define CLI_CMD_LEN_MAX         256
+#define CLI_CMD_LIST_MAX        128
+#define CLI_LINE_BUF_MAX        256
+#define CLI_ARGS_LEN_MAX        128
+#define CLI_HIST_LIST_MAX       128
 
-
+/*          VT100          */
 /*  ---------SP KEY 3 BYTES
 * UP        0x1B 0x5B 0x41
 * DOWN      0x1B 0x5B 0x42
@@ -33,7 +37,7 @@
 * F8        0x1B 0x5B 0x31 0x39 0x7E
 * F9        0x1B 0x5B 0x32 0x30 0x7E
 * F10       0x1B 0x5B 0x32 0x31 0x7E
-* F11       
+* F11       0x1B 0x5B 0x32 0x33 0x7E
 * F12       0x1B 0x5B 0x32 0x34 0x7E
 */
 
@@ -59,7 +63,7 @@ enum
 };
 
 
-typedef struct _consoleDriver
+typedef struct
 {
     int (* open)();
     int (* close)();
@@ -67,55 +71,88 @@ typedef struct _consoleDriver
     int (* putch)(int);
     int (* available)();
 
-} consoleDriver_t;
+} cliDriver_t;
+
+typedef struct 
+{
+    char cmdName[CLI_CMD_LEN_MAX];
+    bool (*cmdFunc)(cliArgs_t*);
+} cliCmd_t;
 
 
-typedef struct _cmdLine
+typedef struct
 {
     char cmd_buffer[CLI_LINE_BUF_MAX];
-    unsigned int buf_len;
-    unsigned int cursor;
+    uint32_t buf_len;
+    uint32_t count;
+    uint32_t cursor;
 
-} cmdLine_t;
+} cliLine_t;
 
 
-typedef struct _cli
+typedef struct
 {
-    cmdLine_t cmdLine;
-    consoleDriver_t* p_driver;
+    cliDriver_t* p_driver;
 
-    int state;
+    bool is_init;
+    uint32_t state;
+    uint32_t argc;
+    char* argv[CLI_ARGS_LEN_MAX];
 
-} cli_t;
+    cliLine_t cmdLine;
 
+    uint32_t cmdHistIndex;
+    uint32_t cmdHistLatest;
+    cliLine_t cmdHistList[CLI_HIST_LIST_MAX];
 
-static cli_t cli_node;
-static consoleDriver_t driver;
+    cliArgs_t cmdArgs;
+    cliCmd_t cmdList[CLI_CMD_LIST_MAX];
+    uint32_t cmdCount;
+} cliNode_t;
 
-int cliInstallDriver(consoleDriver_t* p_driver);
+static cliNode_t cli_node;
+static cliDriver_t driver;
 
-int cliInit(void)
+bool cliInstallDriver(cliDriver_t* p_driver);
+bool cliParseArgs(void);
+void cliAddLine(void);
+void cliChangeLine(bool keyUp);
+
+bool cliInit(void)
 {
-    int ret = 0;
+    bool ret = true;
+
+    if (cli_node.is_init == true)
+    {
+        return ret;
+    }
+
+    memset(&cli_node, 0, sizeof(cli_node));
 
     cli_node.p_driver = &driver;
     cli_node.state = CLI_STATE_NORMAL;
 
     ret = cliInstallDriver(cli_node.p_driver);
 
-    return ret;
-}
+    cli_node.cmdLine.buf_len = CLI_LINE_BUF_MAX;
 
-int cliDeinit(void)
-{
-    int ret = 0;
+    cli_node.is_init = 1;
 
     return ret;
 }
 
-int cliInstallDriver(consoleDriver_t* p_driver)
+bool cliDeinit(void)
 {
-    int ret = 0;
+    bool ret = true;
+
+    cli_node.is_init = false;
+
+    return ret;
+}
+
+bool cliInstallDriver(cliDriver_t* p_driver)
+{
+    bool ret = true;
 
     p_driver->open = termInit;
     p_driver->close = termDeinit;
@@ -126,11 +163,11 @@ int cliInstallDriver(consoleDriver_t* p_driver)
     return ret;
 }
 
-int cliOpen(void)
+bool cliOpen(void)
 {
-    int ret = 0;
+    bool ret = true;
 
-    if ((ret = cli_node.p_driver->open()) != 0)
+    if ((ret = cli_node.p_driver->open()) == true)
     {
         printf("term init failed\n");
     }
@@ -138,15 +175,15 @@ int cliOpen(void)
     return ret;
 }
 
-int cliClose(void)
+bool cliClose(void)
 {
-    int ret = 0;
+    bool ret = true;
     ret = cli_node.p_driver->close();
 
     return ret;
 }
 
-int cliWrite(unsigned char* p_data, unsigned int len)
+uint32_t cliWrite(char* p_data, unsigned int len)
 {
     int i;
 
@@ -158,7 +195,7 @@ int cliWrite(unsigned char* p_data, unsigned int len)
     return i;
 }
 
-int cliRead(void)
+uint32_t cliRead(void)
 {
     int ch = EOF;
 
@@ -167,34 +204,116 @@ int cliRead(void)
     return ch;
 }
 
-int cliAvailable(void)
+void cliPrintf(const char* fmt, ...)
 {
-    int ret;
+    char buf[256];
+    va_list arg;
+    va_start(arg, fmt);
+    int len = 0;
+
+    len = vsnprintf(buf, 256, fmt, arg);
+    va_end(arg);
+
+    cliWrite(buf, len);
+}
+
+uint32_t cliAvailable(void)
+{
+    uint32_t ret;
 
     ret = cli_node.p_driver->available();
 
     return ret;
 }
 
-int cliUpdate(char rx_data)
+bool cliUpdate(char rx_data)
 {
-    int ret = 0;
+    bool ret = false;
+
+    cliLine_t* line = &cli_node.cmdLine;
 
     if (cli_node.state == CLI_STATE_NORMAL)
     {
-        printf("%02X\n", rx_data);
         switch (rx_data)
         {
         case CLI_KEY_ENTER:
-            printf("enter\n");
+            if (line->count > 0)
+            {
+                cliParseArgs();
+                cliAddLine();
+                ret = true;
+            }
+
+            cliPrintf("\n");
+
+
+            line->cmd_buffer[line->count] = '\0';
+            line->count = 0;
+            line->cursor = 0;
+            
+            
+
             break;
         case CLI_KEY_DEL:
-            printf("backspace\n");
+            if (line->count>0 && line->cursor>0)
+            {
+                if (line->count == line->cursor)
+                {
+                    line->count--;
+                }
+                else if (line->count > line->cursor)
+                {
+                    int mov_amount = 0;
+                    mov_amount = line->count - line->cursor;
+
+
+                    for (int i=0; i<mov_amount; i++)
+                    {
+                        line->cmd_buffer[line->cursor+i-1] = line->cmd_buffer[line->cursor+i];
+                    }
+
+                    line->count--;
+                }
+
+                if (line->cursor > 0)
+                {
+                    line->cursor--;
+                    cliPrintf("\b\x1B[1P");
+                }
+            }
+            
             break;
         case CLI_KEY_ESC:
             cli_node.state = CLI_STATE_SP1;
             break;
         default:
+            if (line->count < CLI_LINE_BUF_MAX)
+            {
+                if (line->count == line->cursor)
+                {
+                    cliWrite((char* )&rx_data, 1);
+
+                    line->cmd_buffer[line->count] = rx_data;
+                    line->count++;
+                    line->cursor++;
+                }
+                else if (line->count > line->cursor)
+                {
+                    int mov_amount = 0;
+
+                    mov_amount = line->count - line->cursor;
+
+                    for (int i=0; i<mov_amount; i++)
+                    {
+                        line->cmd_buffer[line->count - i] = line->cmd_buffer[line->count - i - 1];
+                    }
+
+                    line->cmd_buffer[line->cursor] = rx_data;
+                    line->count++;
+                    line->cursor++;
+                    cliPrintf("\x1B[4h%c\x1B[4l", rx_data);
+                }   
+            }
             break;
         }
 
@@ -218,27 +337,45 @@ int cliUpdate(char rx_data)
     case CLI_STATE_SP3:
         if (rx_data == CLI_KEY_UP)
         {
-            printf("up\n");
+            cliChangeLine(true);
         }
         else if (rx_data == CLI_KEY_DOWN)
         {
-            printf("down\n");
+            cliChangeLine(false);
         }
         else if (rx_data == CLI_KEY_LEFT)
         {
-            printf("left\n");
+            if (line->cursor > 0)
+            {
+                line->cursor--;
+                cliPrintf("\x1B\x5B\x44");
+
+            }
         }
         else if (rx_data == CLI_KEY_RIGHT)
         {
-            printf("right\n");
+            if (line->cursor < line->count)
+            {
+                line->cursor++;
+                cliPrintf("\x1B\x5B\x43");
+            }
+            
         }
         else if (rx_data == CLI_KEY_HOME)
         {
-            printf("HOME\n");
+            if (line->cursor > 0)
+            {
+                cliPrintf("\x1B[%dD", line->cursor);
+                line->cursor = 0;
+            }
         }
         else if (rx_data == CLI_KEY_END)
         {
-            printf("END\n");
+            if (line->count - line->cursor > 0)
+            {
+                cliPrintf("\x1B[%dC", line->count - line->cursor);
+                line->cursor = line->count;
+            }
         }
         else
         {
@@ -257,9 +394,9 @@ int cliUpdate(char rx_data)
     return ret;
 }
 
-int cliSpinOnce(void)
+bool cliSpinOnce(void)
 {
-    int ret = 1;
+    bool ret = false;
 
     char rx_data;
     
@@ -273,6 +410,129 @@ int cliSpinOnce(void)
     return ret;
 }
 
+
+bool cliParseArgs(void)
+{
+    bool ret = true;
+    const char* delim = " \t";
+    int argc = 0;
+    char** argv = cli_node.argv;
+    char* ret_ptr = NULL;
+    char* next_ptr = NULL;
+
+    argv[argc] = NULL;
+
+    for (ret_ptr = __strtok_r(cli_node.cmdLine.cmd_buffer, delim, &next_ptr); ret_ptr; ret_ptr = __strtok_r(NULL, delim, &next_ptr))
+    {
+        argv[argc++] = ret_ptr;
+    }
+
+    cli_node.argc = argc;
+
+    if (argc < 1)
+    {
+        ret = false;
+    }
+
+    return ret;
+}
+
+void cliAddLine(void)
+{
+    cli_node.cmdHistList[cli_node.cmdHistLatest] = cli_node.cmdLine;
+
+    if (cli_node.cmdHistLatest < CLI_HIST_LIST_MAX)
+    {
+        cli_node.cmdHistLatest = (cli_node.cmdHistLatest + 1) % CLI_HIST_LIST_MAX;
+    }
+
+    cli_node.cmdHistIndex = cli_node.cmdHistLatest;
+}
+
+void cliChangeLine(bool keyUp)
+{
+    int index = 0;
+    
+
+    if (cli_node.cmdHistLatest == 0)
+    {
+        return;
+    }
+
+    if(keyUp == false)
+    {
+        if (cli_node.cmdHistIndex >= cli_node.cmdHistLatest)
+        {
+            cli_node.cmdHistIndex = cli_node.cmdHistLatest;
+            return;
+        }
+
+        index = ++cli_node.cmdHistIndex;
+    }
+    else
+    {
+        if (cli_node.cmdHistIndex <= 0)
+        {
+            cli_node.cmdHistIndex = 0;
+            return;
+        }
+        
+        index = --cli_node.cmdHistIndex;
+    }
+
+
+    if (cli_node.cmdLine.cursor > 0)
+    {
+        cliPrintf("\x1B[%dD", cli_node.cmdLine.cursor);
+    }
+
+    if (cli_node.cmdLine.count > 0)
+    {
+        cliPrintf("\x1B[%dP", cli_node.cmdLine.count);
+    }
+
+    cliWrite(cli_node.cmdHistList[index].cmd_buffer, cli_node.cmdHistList[index].count);
+    cli_node.cmdLine = cli_node.cmdHistList[index];
+}
+
+
+bool cliAddcommand(const char *cmdName, void (*p_func)(cliArgs_t *args))
+{
+    bool ret = true;
+
+    if (cli_node.cmdCount >= CLI_CMD_LIST_MAX)
+    {
+        ret = false;
+        return ret;
+    }
+
+    strcpy(cli_node.cmdList[cli_node.cmdCount].cmdName, cmdName);
+    cli_node.cmdList[cli_node.cmdCount].cmdFunc = p_func;
+
+    cli_node.cmdCount++;
+    return ret;
+}
+
+bool cliRunCommand(void)
+{
+    bool ret = true;
+
+
+
+    for (int i=0; i<cli_node.cmdCount; i++)
+    {
+        if (strcmp(cli_node.argv[0], cli_node.cmdList[i].cmdName) == 0)
+        {
+            cli_node.cmdArgs.argc = cli_node.argc;
+            cli_node.cmdArgs.argv = cli_node.argv;
+
+            cli_node.cmdList[i].cmdFunc(&cli_node.cmdArgs);
+        }
+    }
+
+
+    return true;
+}
 
 #endif
 
